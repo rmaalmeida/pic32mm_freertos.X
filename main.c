@@ -17,7 +17,7 @@
         Device            :  PIC32MM0064GPL036
     The generated drivers are tested against the following:
         Compiler          :  XC32 1.42
-        MPLAB             :  MPLAB X 3.60
+        MPLAB             :  MPLAB X 4.01
  */
 
 /*
@@ -46,19 +46,187 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "timers.h"
+#include "queue.h"
 
+
+/*-----------------------------------------------------------*/
 /*
-                         Main application
+ * The tasks prototypes
  */
 
+void taskLeds(void *pvParameters);
+void taskButtons(void *pvParameters);
+void task_PID(void *pvParameters);
+
+/*
+ * The callback function for the blinky RGB software timer.
+ */
+static void prvBlinkyTimerCallback(TimerHandle_t xTimer);
+
+//Internal PID function
 int16_t pid_sw_fixed(int ad);
+
+
+// Global variables
+
+enum {
+    LED_STATE_OFF, LED_STATE_ON
+};
+
+typedef struct {
+    unsigned int num; // BSP_LED_1, BSP_LED_2, BSP_LED_3
+    unsigned int status; // BSP_LED_STATE_OFF, BSP_LED_STATE_ON
+} LedInfo;
+
+QueueHandle_t ledQueue;
 int16_t sp;
 
-static void prvBlinkyTimerCallback(TimerHandle_t xTimer) {
-    IO_RA0_Toggle();
+static QueueHandle_t xQueue = NULL;
+
+/*
+ *    Main application
+ */
+
+
+void main(void) {
+    TimerHandle_t xTimer;
+
+    // initialize the device
+    SYSTEM_Initialize();
+
+
+    // When using interrupts, you need to set the Global Interrupt Enable bits
+    // Use the following macros to:
+
+    // Enable the Global Interrupts
+    //INTERRUPT_GlobalEnable();
+
+    // Disable the Global Interrupts
+    //INTERRUPT_GlobalDisable();
+
+    xTaskCreate(task_PID, /* The function that implements the task. */
+            "Rx", /* The text name assigned to the task - for debug only as it is not used by the kernel. */
+            configMINIMAL_STACK_SIZE, /* The size of the stack to allocate to the task. */
+            NULL, /* The parameter passed to the task - just to check the functionality. */
+            tskIDLE_PRIORITY + 1, /* The priority assigned to the task. */
+            NULL);
+
+
+
+    /* Create the queue. */
+    ledQueue = xQueueCreate(1, sizeof (LedInfo));
+
+    /* Create the blinky software timer as described at the top of this file. */
+    xTimer = xTimerCreate("Blinky", /* A text name, purely to help debugging. */
+            1, /* The timer period. */
+            pdTRUE, /* This is an auto-reload timer, so xAutoReload is set to pdTRUE. */
+            (void *) 0, /* The ID is not used, so can be set to anything. */
+            prvBlinkyTimerCallback /* The callback function that inspects the status of all the other tasks. */
+            );
+
+    if (xTimer != NULL) {
+        xTimerStart(xTimer, 0);
+    }
+
+    if (ledQueue != NULL) {
+        /* Create the two tasks as described in the comments at the top of this file. */
+        xTaskCreate(taskLeds, "taskLeds", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
+        xTaskCreate(taskButtons, "taskButtons", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
+    }
+
+    /* Start the tasks and timer running. */
+    vTaskStartScheduler();
+
+    /* If all is well, the scheduler will now be running, and the following
+    line will never be reached.  If the following line does execute, then
+    there was insufficient FreeRTOS heap memory available for the idle and/or
+    timer tasks	to be created.  See the memory management section on the
+    FreeRTOS web site for more details. */
+    for (;;);
 }
 
-static void task1(void *pvParameters) {
+
+/*-----------------------------------------------------------*/
+
+/*
+ * TASKS
+ */
+
+static int color;
+
+static void prvBlinkyTimerCallback(TimerHandle_t xTimer) {
+    /* This function is called when the blinky software time expires.*/
+    color++;
+
+    if (color % 20 != 0) {
+        IO_RA2_SetLow();
+        IO_RA3_SetLow();
+        IO_RB12_SetLow();
+        return;
+    }
+    if (color & 0x200) {
+        IO_RA2_SetHigh();
+    }
+    if (color & 0x400) {
+        IO_RB12_SetHigh();
+    }
+    if (color & 0x800) {
+        IO_RA3_SetHigh();
+    }
+
+
+}
+
+
+
+void taskLeds(void *pvParameters) {
+    LedInfo led;
+    for (;;) {
+        xQueueReceive(ledQueue, &led, portMAX_DELAY);
+        //if led num == 1
+        if (led.num == 1) {
+            if (led.status == LED_STATE_ON) {
+                IO_RA0_SetHigh();
+            } else {
+                IO_RA0_SetLow();
+            }
+        }
+        if (led.num == 2) {
+            if (led.status == LED_STATE_ON) {
+                IO_RC9_SetHigh();
+            } else {
+                IO_RC9_SetLow();
+            }
+        }
+
+    }
+}
+
+void taskButtons(void *pvParameters) {
+    LedInfo led;
+    int num = 1;
+    for (;;) {
+        led.num = 1;
+        if (!IO_RB7_GetValue()) {
+            led.status = LED_STATE_ON;
+        } else {
+            led.status = LED_STATE_OFF;
+        }
+        xQueueSend(ledQueue, &led, portMAX_DELAY);
+
+        led.num = 2;
+        if (!IO_RB13_GetValue()) {
+            led.status = LED_STATE_ON;
+        } else {
+            led.status = LED_STATE_OFF;
+        }
+        xQueueSend(ledQueue, &led, portMAX_DELAY);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+
+
+void task_PID(void *pvParameters) {
     uint16_t ad;
     uint16_t res;
     int t;
@@ -79,32 +247,58 @@ static void task1(void *pvParameters) {
     }
 }
 
-void main(void) {
-
-    // initialize the device
-    SYSTEM_Initialize();
 
 
-    // When using interrupts, you need to set the Global Interrupt Enable bits
-    // Use the following macros to:
 
-    // Enable the Global Interrupts
-    //INTERRUPT_GlobalEnable();
+///PID control function
 
-    // Disable the Global Interrupts
-    //INTERRUPT_GlobalDisable();
 
-    xTaskCreate(task1, /* The function that implements the task. */
-            "Rx", /* The text name assigned to the task - for debug only as it is not used by the kernel. */
-            configMINIMAL_STACK_SIZE, /* The size of the stack to allocate to the task. */
-            NULL, /* The parameter passed to the task - just to check the functionality. */
-            tskIDLE_PRIORITY + 1, /* The priority assigned to the task. */
-            NULL);
+const float f_kp = 1, f_ki = 50, f_kd = 0;
+const float f_T = 0.005;
 
-    /* Start the tasks and timer running. */
-    vTaskStartScheduler();
+#define SHIFT (256)
+int16_t i_e0 = 0, i_e1 = 0, i_e2 = 0;
+int16_t i_y0 = 0, i_y1 = 0;
+int16_t sp;
+
+
+#define MAX_SAT 1023
+#define MIN_SAT 0
+
+int16_t pid_sw_fixed(int ad) {
+    const int16_t i_k1 = (f_kp + f_ki * f_T + f_kd / f_T) * SHIFT;
+    const int16_t i_k2 = -((f_kp + 2 * f_kd / f_T) * SHIFT);
+    const int16_t i_k3 = (f_kd / f_T) * SHIFT;
+
+    // Update variables
+    i_y1 = i_y0;
+    i_e2 = i_e1;
+    i_e1 = i_e0;
+
+    //ad = READ_AD())
+    i_e0 = (sp - ad);
+
+    // Processing
+    i_y0 = (((int32_t) i_k1 * i_e0) + ((int32_t) i_k2 * i_e1) + ((int32_t) i_k3 * i_e2));
+    i_y0 = i_y0 >> 8;
+    i_y0 += i_y1;
+
+    // Saturation
+    if (i_y0 > MAX_SAT) {
+        i_y0 = MAX_SAT;
+    } else if (i_y0 < MIN_SAT) {
+        i_y0 = MIN_SAT;
+    }
+
+    return i_y0;
 }
 
+////////////////////////////////////////////////////////
+
+// Portability functions
+
+
+/*-----------------------------------------------------------*/
 void vApplicationMallocFailedHook(void) {
     /* vApplicationMallocFailedHook() will only be called if
     configUSE_MALLOC_FAILED_HOOK is set to 1 in FreeRTOSConfig.h.  It is a hook
@@ -166,57 +360,4 @@ void vAssertCalled(const char * pcFile, unsigned long ulLine) {
         }
     }
     __asm volatile( "ei");
-}
-
-
-/**
- End of File
- */
-
-float f_e0 = 0, f_e1 = 0, f_e2 = 0;
-float f_y0 = 0, f_y1 = 0;
-const float f_kp = 1, f_ki = 50, f_kd = 0;
-const float f_T = 0.005;
-
-#define SHIFT (256)
-int16_t i_e0 = 0, i_e1 = 0, i_e2 = 0;
-int16_t i_y0 = 0, i_y1 = 0;
-int16_t sp;
-
-
-#define MAX_SAT 1023
-#define MIN_SAT 0
-
-int16_t pid_sw_fixed(int ad) {
-    const int16_t i_k1 = (f_kp + f_ki * f_T + f_kd / f_T) * SHIFT;
-    const int16_t i_k2 = -((f_kp + 2 * f_kd / f_T) * SHIFT);
-    const int16_t i_k3 = (f_kd / f_T) * SHIFT;
-
-    // Update variables
-    i_y1 = i_y0;
-    i_e2 = i_e1;
-    i_e1 = i_e0;
-
-    //ad = READ_AD())
-    i_e0 = (sp - ad);
-
-    // Processing
-    //the multiplication is for a number range in 4.2(6 bits) (gains from zero up to +15.75) 
-    // times 0.3ff (10 bits)
-    //    y0 = y1 + (i_kp * (e0 - e2)) +
-    //            (i_ki * (e0) * i_T) +
-    //            (i_kd * (e0 - (2 * e1) + e2) / i_T);
-    //stated in terms of errors instead of coefficients
-    i_y0 = (((int32_t) i_k1 * i_e0) + ((int32_t) i_k2 * i_e1) + ((int32_t) i_k3 * i_e2));
-    i_y0 = i_y0 >> 8;
-    i_y0 += i_y1;
-
-    // Saturation
-    if (i_y0 > MAX_SAT) {
-        i_y0 = MAX_SAT;
-    } else if (i_y0 < MIN_SAT) {
-        i_y0 = MIN_SAT;
-    }
-
-    return i_y0;
 }

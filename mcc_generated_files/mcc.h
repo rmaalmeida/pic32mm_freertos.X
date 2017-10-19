@@ -48,9 +48,9 @@
 #include "pin_manager.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "sccp2_compare.h"
 #include "interrupt_manager.h"
 #include "exceptions.h"
-#include "sccp2_compare.h"
 #include "adc1.h"
 
 #define _XTAL_FREQ  8000000UL
